@@ -11,7 +11,7 @@ and computation of MSE
 
 import numpy as np
 from jax import numpy as jnp
-from jax import vmap
+from jax import grad, lax, jit, vmap, random
 import scipy.spatial.distance as distance
 from scipy import stats
 import math
@@ -204,7 +204,45 @@ def sample_gandk_outl(n,d,theta, n_cont = 0):
     return np.asarray(x) 
     
 
+def sample_Queue(params, n, service_shape_parameter=1, arrival_shape_parameter=0.5,
+                  sample_period=20, burn_in_period=10, constant_seed=None):
+    service_rate, arrival_rate = params
+    nsamples = n
+    if constant_seed is not None:
+        key = random.PRNGKey(constant_seed)
+    else:
+        key = random.PRNGKey(0)
 
+    recurrsionvar = jnp.zeros(nsamples)
+    totaltime = jnp.zeros(nsamples)
+
+    service_times, arrival_times = pull_simulation_drivers(service_shape_parameter, arrival_shape_parameter, nsamples, 
+                                                           sample_period + burn_in_period, key)
+
+    service_ratio = service_shape_parameter / service_rate
+    arrival_ratio = arrival_shape_parameter / arrival_rate
+
+    for i in range(sample_period + burn_in_period):
+        # Simulate from G/G/1
+        recurrsionvar = jnp.maximum(recurrsionvar + service_ratio * service_times[:, i]
+                                        - arrival_ratio * arrival_times[:, i], 0.0)
+
+        if i >= burn_in_period:
+            totaltime += recurrsionvar
+
+    return totaltime / sample_period
+
+def pull_simulation_drivers(service_shape_parameter, arrival_shape_parameter, nsamples, total_samples, key=None):
+
+    # Simulate the Gamma arrival and service times
+    service_shape_paras = jnp.full((nsamples, total_samples), service_shape_parameter)
+    arrival_shape_paras = jnp.full((nsamples, total_samples), arrival_shape_parameter)
+
+    key, subkey = random.split(key)
+    service_times = random.gamma(key, service_shape_paras, None)
+    arrival_times = random.gamma(subkey, arrival_shape_paras, None)
+
+    return service_times, arrival_times
     
 def sample_togswitch_noise(params,n,T, df, add_noise=True):
     alpha1 = np.exp(params[0])

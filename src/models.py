@@ -10,7 +10,7 @@ import numpy as np
 from jax import grad, lax, jit, vmap, random
 import jax.numpy as jnp
 from jax.scipy import stats as jstats
-from jax.ops import index, index_update
+#from jax.ops import index, index_update
 
 class gauss_model():
     
@@ -60,152 +60,196 @@ class gauss_model():
         x = self.generator(unif,theta)
 
         return x
-    
-class g_and_k_model():
-    
-    def __init__(self, m, d):
-        self.d = d  # data dimension
+
+
+class QueueModel():
+    def __init__(self, m, shape=None):
         self.m = m  # number of points sampled from P_\theta at each optim. iteration
+        self.shape = shape
     
-    # generator
-    def generator(self, z, theta):
-        a = theta[0]
-        b = theta[1]
-        g = theta[2]
-        k = jnp.exp(theta[3])
-        g = a+b*(1+0.8*((1-jnp.exp(-g*z))/(1+jnp.exp(-g*z))))*((1+z**2)**(k))*z
-        return g
+    def generator(self, theta, service_shape_parameter=1, arrival_shape_parameter=0.5,
+                  sample_period=20, burn_in_period=10, constant_seed=None):
+        service_rate, arrival_rate = theta
+        if self.shape is not None:
+            service_shape_parameter = self.shape
+        if constant_seed is not None:
+            key = random.PRNGKey(constant_seed)
+        else:
+            key = random.PRNGKey(np.random.randint(2**32))
 
-    # gradient of the generator
-    def grad_generator(self, z,theta):
-        #a = theta[0]
-        b = theta[1]
-        g = theta[2]
-        k = np.exp(theta[3])
-        grad1 = np.ones(z.shape[0])
-        grad2 = (1+(4/5)*((1-np.exp(-g*z))/(1+np.exp(-g*z))))*(np.exp(k*np.log(1+z**2)))*z
-        grad3 = (8/5)*theta[1]*((np.exp(g*z))/(1+np.exp(g*z))**2)*(np.exp(k*np.log(1+z**2)))*z**2
-        grad4 = b*(1+0.8*((1-np.exp(-g*z))/(1+np.exp(-g*z))))*(np.exp(k*np.log(1+z**2)))*np.log(1+z**2)*z
-        return np.expand_dims(np.einsum('ij->ji',np.c_[grad1,grad2,grad3,grad4]), axis=0)
-    
-    def sample(self,theta,key):          
+        recurrsionvar = jnp.zeros(self.m)
+        totaltime = jnp.zeros(self.m)
 
-      # generate uniforms
-      #unif = np.random.rand(self.m,self.d+1)
-      
-      # generate standard normals  
-      #z = normals(self.m,self.d,unif)
-      z = random.normal(key, shape=(512,1))
+        service_times, arrival_times = self.pull_simulation_drivers(service_shape_parameter, arrival_shape_parameter,
+                                                                    sample_period + burn_in_period, key)
 
-      # generate samples from g-and-k distribution
-      x = self.generator(z,theta)
-  
-      return jnp.asarray(x), jnp.asarray(z)
-  
-class toggle_switch_model():
-    
-    def __init__(self, m, d, T):
-        self.d = d  # data dim
-        self.m = m  # number of points sampled from P_\theta at each optim. iteration
-        self.T = T
-        self.seed = 11
+        service_ratio = service_shape_parameter / service_rate
+        arrival_ratio = arrival_shape_parameter / arrival_rate
+
+        for i in range(sample_period + burn_in_period):
+            # Simulate from G/G/1
+            recurrsionvar = jnp.maximum(recurrsionvar + service_ratio * service_times[:, i]
+                                        - arrival_ratio * arrival_times[:, i], 0.0)
+
+            if i >= burn_in_period:
+                totaltime += recurrsionvar
+
+        return totaltime / sample_period
+
+    def pull_simulation_drivers(self, service_shape_parameter, arrival_shape_parameter, total_samples, key=None):
+        # Simulate the Gamma arrival and service times
+        service_shape_paras = jnp.full((self.m, total_samples), service_shape_parameter)
+        arrival_shape_paras = jnp.full((self.m, total_samples), arrival_shape_parameter)
         
-    def ugenerator(self):
-        uvals = np.random.uniform(size=(self.m,(2*self.T)+1))
-        return(uvals)
-        
-    def generator(self,theta):
-
-        alpha1 = jnp.exp(theta[0])
-        alpha2 = jnp.exp(theta[1])
-        beta1 = theta[2]
-        beta2 = theta[3]
-        mu = jnp.exp(theta[4])
-        sigma = jnp.exp(theta[5])
-        gamma = theta[6]
-
-        nsamples= 500
-        T = 300
-        u = jnp.zeros(nsamples)
-        v = jnp.zeros(nsamples)
-
-     
-        seed=13
-        key = random.PRNGKey(seed)
-        key, *key_inputs = random.split(key, num=T+1)
-
-        u = index_update(u, index[:], 10.)
-        v = index_update(v, index[:], 10.)
-        init_list = jnp.array([u,v])
-
-        def step(current_array,key):
-            u_t, v_t = current_array[0], current_array[1]
-            key, subkey = random.split(key)
-            u_new = u_t +(alpha1/(1.+(v_t**beta1)))-(1.+0.03*u_t)
-            u_next = u_new+0.5*random.truncated_normal(subkey,-2*u_new, math.inf)
-            v_new = v_t +(alpha2/(1.+(u_t**beta2)))-(1.+0.03*v_t)
-            key, subkey = random.split(key)
-            v_next = v_new+0.5*random.truncated_normal(subkey,-2*v_new, math.inf)
-            return jnp.array([u_next,v_next]), key
-
-        final_array, _  = lax.scan(step, init_list, jnp.array(key_inputs))
-        u, v = final_array[0], final_array[1]
-
-        lb = -(u + mu) / (mu*sigma)*(u**gamma)
         key, subkey = random.split(key)
-        yvals = u + mu + mu*sigma*random.truncated_normal(subkey, lb, math.inf, shape=(nsamples,)) / (u**gamma)
+        service_times = random.gamma(key, service_shape_paras, None)
+        arrival_times = random.gamma(subkey, arrival_shape_paras, None)
 
-        return (jnp.atleast_2d(yvals).T)
-        
-        
-    def sample(self,theta):
-        #uvals = self.ugenerator()
-        x = self.generator(theta) 
-        return jnp.array(x)
+        return service_times, arrival_times
     
-    def generator_single(self,theta,uvals):
-        """This function is used to find the gradient of the generator using JAX autodiff via vmap. 
-        The user provides the value of the parameter theta and the one dimensional uniform samples uvals of length 2T+1, """
+    def pull_simulation_drivers_single(self, service_shape_parameter, arrival_shape_parameter, total_samples, key=None):
+        # Simulate the Gamma arrival and service times
+        service_shape_paras = jnp.full((1, total_samples), service_shape_parameter)
+        arrival_shape_paras = jnp.full((1, total_samples), arrival_shape_parameter)
         
-        alpha1 = theta[0]
-        alpha2 = theta[1]
-        beta1 = theta[2]
-        beta2 = theta[3]
-        mu = theta[4]
-        sigma = theta[5]
-        gamma =  theta[6]
+        key, subkey = random.split(key)
+        service_times = random.gamma(key, service_shape_paras, None)
+        arrival_times = random.gamma(subkey, arrival_shape_paras, None)
 
-        u = jnp.zeros(self.T, dtype='float64')
-        v = jnp.zeros(self.T, dtype='float64')
-        u_new = jnp.zeros(self.T)
-        v_new = jnp.zeros(self.T)
-        phi_u_new = jnp.zeros(self.T)
-        phi_v_new = jnp.zeros(self.T)
-
-
-        u = index_update(u, index[0], 10.)
-        v = index_update(v, index[0], 10.)
-
-        for t in range(0,self.T-1):
-
-            u_new = u[t] +(alpha1/(1.+(v[t]**beta1)))-(1.+0.03*u[t])
-            phi_u_new = jstats.norm.cdf(-2.*u_new)
-            u = index_update(u, index[t+1],u_new+0.5*jstats.norm.ppf(phi_u_new+uvals[t]*(1.-phi_u_new)))
-
-            v_new = v[t] +(alpha2/(1.+(u[t]**beta2)))-(1.+0.03*v[t])
-            phi_v_new = jstats.norm.cdf(-2.*v_new)
-            v = index_update(v, index[t+1], v_new+0.5*jstats.norm.ppf(phi_v_new+uvals[self.T+t]*(1.-phi_v_new)))
-
-
-        lb = -(u[self.T-1] + mu) / (mu*sigma)*(u[self.T-1]**gamma)
-        phi_lb = jstats.norm.cdf(lb)
-        yval = (jstats.norm.ppf(phi_lb+uvals[2*self.T]*(1.-phi_lb))*(sigma)*(mu)*(u[self.T-1]**(-gamma)))+(mu+u[self.T-1]) 
-
-        return yval
+        return service_times, arrival_times
     
-    def grad_generator(self,uvals,theta):  # automatic differentiation for gradient of generator using JAX
+    def sample(self, theta, constant_seed=None):
+        # theta: (service_rate, arrival_rate)
+        x = self.generator(theta, constant_seed=constant_seed)
+        return x
+    
+    def generator_single(self, theta, uvals, service_shape_parameter=1, arrival_shape_parameter=1,
+                  sample_period=20, burn_in_period=10, constant_seed=None):
+        service_rate, arrival_rate = theta
+        if self.shape is not None:
+            service_shape_parameter = self.shape
+        if constant_seed is not None:
+            key = random.PRNGKey(constant_seed)
+        else:
+            key = random.PRNGKey(np.random.randint(2**32))
+
+        recurrsionvar = jnp.zeros(1)
+        totaltime = jnp.zeros(1)
+
+        service_times, arrival_times = self.pull_simulation_drivers_single(service_shape_parameter, arrival_shape_parameter,
+                                                                    sample_period + burn_in_period, key)
+
+        service_ratio = service_shape_parameter / service_rate
+        arrival_ratio = arrival_shape_parameter / arrival_rate
+
+        for i in range(sample_period + burn_in_period):
+            # Simulate from G/G/1
+            recurrsionvar = jnp.maximum(recurrsionvar + service_ratio * service_times[:, i]
+                                        - arrival_ratio * arrival_times[:, i], 0.0)
+
+            if i >= burn_in_period:
+                totaltime += recurrsionvar
+
+        return totaltime / sample_period
+    
+    def grad_generator(self, theta):
         gradient = grad(self.generator_single, argnums=0)
-        grad_ = vmap(jit(gradient), in_axes=(None,0), out_axes=1)(theta,uvals)
+        grad_ = vmap(jit(gradient), in_axes=(None,0), out_axes=1)(theta)
         return jnp.reshape(grad_, (1,len(theta),self.m))
     
+class QueueModel_1d():
+    def __init__(self, m, shape=None):
+        self.m = m  # number of points sampled from P_\theta at each optim. iteration
+        self.shape = shape
     
+    def generator(self, theta, service_shape_parameter=1, arrival_shape_parameter=0.5,
+                  sample_period=20, burn_in_period=10, constant_seed=None):
+        service_rate = theta
+        arrival_rate = 1
+        if self.shape is not None:
+            service_shape_parameter = self.shape
+        if constant_seed is not None:
+            key = random.PRNGKey(constant_seed)
+        else:
+            key = random.PRNGKey(np.random.randint(2**32))
+
+        recurrsionvar = jnp.zeros(self.m)
+        totaltime = jnp.zeros(self.m)
+
+        service_times, arrival_times = self.pull_simulation_drivers(service_shape_parameter, arrival_shape_parameter,
+                                                                    sample_period + burn_in_period, key)
+
+        service_ratio = service_shape_parameter / service_rate
+        arrival_ratio = arrival_shape_parameter / arrival_rate
+
+        for i in range(sample_period + burn_in_period):
+            # Simulate from G/G/1
+            recurrsionvar = jnp.maximum(recurrsionvar + service_ratio * service_times[:, i]
+                                        - arrival_ratio * arrival_times[:, i], 0.0)
+
+            if i >= burn_in_period:
+                totaltime += recurrsionvar
+
+        return totaltime / sample_period
+
+    def pull_simulation_drivers(self, service_shape_parameter, arrival_shape_parameter, total_samples, key=None):
+        # Simulate the Gamma arrival and service times
+        service_shape_paras = jnp.full((self.m, total_samples), service_shape_parameter)
+        arrival_shape_paras = jnp.full((self.m, total_samples), arrival_shape_parameter)
+        
+        key, subkey = random.split(key)
+        service_times = random.gamma(key, service_shape_paras, None)
+        arrival_times = random.gamma(subkey, arrival_shape_paras, None)
+
+        return service_times, arrival_times
+    
+    def pull_simulation_drivers_single(self, service_shape_parameter, arrival_shape_parameter, total_samples, key=None):
+        # Simulate the Gamma arrival and service times
+        service_shape_paras = jnp.full((1, total_samples), service_shape_parameter)
+        arrival_shape_paras = jnp.full((1, total_samples), arrival_shape_parameter)
+        
+        key, subkey = random.split(key)
+        service_times = random.gamma(key, service_shape_paras, None)
+        arrival_times = random.gamma(subkey, arrival_shape_paras, None)
+
+        return service_times, arrival_times
+    
+    def sample(self, theta, constant_seed=None):
+        # theta: (service_rate, arrival_rate)
+        x = self.generator(theta, constant_seed=constant_seed)
+        return x
+    
+    def generator_single(self, theta, uvals, service_shape_parameter=1, arrival_shape_parameter=1,
+                  sample_period=20, burn_in_period=10, constant_seed=None):
+        service_rate = theta
+        arrival_rate = 1
+        if self.shape is not None:
+            service_shape_parameter = self.shape
+        if constant_seed is not None:
+            key = random.PRNGKey(constant_seed)
+        else:
+            key = random.PRNGKey(np.random.randint(2**32))
+
+        recurrsionvar = jnp.zeros(1)
+        totaltime = jnp.zeros(1)
+
+        service_times, arrival_times = self.pull_simulation_drivers_single(service_shape_parameter, arrival_shape_parameter,
+                                                                    sample_period + burn_in_period, key)
+
+        service_ratio = service_shape_parameter / service_rate
+        arrival_ratio = arrival_shape_parameter / arrival_rate
+
+        for i in range(sample_period + burn_in_period):
+            # Simulate from G/G/1
+            recurrsionvar = jnp.maximum(recurrsionvar + service_ratio * service_times[:, i]
+                                        - arrival_ratio * arrival_times[:, i], 0.0)
+
+            if i >= burn_in_period:
+                totaltime += recurrsionvar
+
+        return totaltime / sample_period
+    
+    def grad_generator(self, theta):
+        gradient = grad(self.generator_single, argnums=0)
+        grad_ = vmap(jit(gradient), in_axes=(None,0), out_axes=1)(theta)
+        return jnp.reshape(grad_, (1,len(theta),self.m))

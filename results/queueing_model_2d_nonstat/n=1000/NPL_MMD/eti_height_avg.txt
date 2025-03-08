@@ -1,0 +1,1 @@
+mean CI width for arrival rate: 2.4067753961659917

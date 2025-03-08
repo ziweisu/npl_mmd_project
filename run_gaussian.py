@@ -5,12 +5,11 @@ Created on Wed Sep 29 16:36:07 2021
 
 @author: HaritaDellaporta
 """
-
 import sys
 sys.path.append("./src")
 
 from utils import sample_gaussian_outl
-from plot_functions import SeabornFig2Grid, plot_gauss_4d_mmd_vs_was, plot_gauss_4d, plot_posterior_marginals_mmd_vs_mabc
+from plot_functions import SeabornFig2Grid, plot_gauss_4d, plot_posterior_marginals_mmd_vs_mabc, plot_gauss_4d_3
 import NPL
 import models
 import numpy as np
@@ -28,7 +27,7 @@ import matplotlib.pyplot as plt
 # Paths
 data_path = "./data/Gaussian_location_model/"
 results_path = "./results/Gaussian_location_model/"
-plots_path = "./plots/Gaussian_location_model/"
+plots_path = "./plots_new/Gaussian_location_model/"
 
 # Set to True to generate and save fresh datasets or False to load saved datasets
 sample_data_bool = False
@@ -82,7 +81,7 @@ for j in range(R):
         print(total)
         sample = npl.sample
         wll_sample = npl.wll_sample
-        wasserstein_sample = npl.was
+        wasserstein_sample = npl.was_sample
         summary_stats[j,n_cont,:,0] = np.mean(sample, axis=0)
         summary_stats_wll[j,n_cont,:,0] = np.mean(wll_sample, axis=0)
         summary_stats[j,n_cont,:,1] = np.std(sample, axis=0)
@@ -93,9 +92,16 @@ for j in range(R):
         summary_stats_wll[j,n_cont,:,3] =  stats.mode(wll_sample, axis=0)[0]
         np.savetxt(results_path+'NPL_MMD/thetas_mmd_outl_{}_run_{}_dim_{}.txt'.format(n_cont,j,d), sample)
         np.savetxt(results_path+'NPL_WLL/thetas_wll_outl_{}_run_{}_dim_{}.txt'.format(n_cont,j,d), sample)
-        
-np.savetxt(results_path+'NPL_MMD/summary_stats.txt', summary_stats)
-np.savetxt(results_path+'NPL_WLL/summary_stats.txt', summary_stats_wll)
+
+# Reshape summary_stats to 2D array
+summary_stats_2d = summary_stats.reshape(R * outl, p * 4)
+summary_stats_wll_2d = summary_stats_wll.reshape(R * outl, p * 4)
+
+# Save the reshaped array
+np.savetxt(results_path+'NPL_MMD/summary_stats.txt', summary_stats_2d)
+#np.savetxt(results_path+'NPL_MMD/summary_stats.txt', summary_stats)
+np.savetxt(results_path+'NPL_WLL/summary_stats.txt', summary_stats_wll_2d)
+#np.savetxt(results_path+'NPL_WLL/summary_stats.txt', summary_stats_wll)
 
 np.savetxt(results_path+'NPL_MMD/cpu_times.txt', times)     
 #%%

@@ -522,7 +522,7 @@ class SeabornFig2Grid():
                 ax.set_title(self.title, fontsize=18)
 
     def _finalize(self):
-        plt.close(self.sg.fig)
+        #plt.close(self.sg.fig)
         self.fig.canvas.mpl_connect("resize_event", self._resize)
         self.fig.canvas.draw()
 

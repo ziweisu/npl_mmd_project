@@ -1,0 +1,1 @@
+mean CI width for service rate: 0.11851710192279194
